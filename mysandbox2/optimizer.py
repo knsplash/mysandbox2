@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 from dask.distributed import Client
 
+from scipy.optimize import minimize, OptimizeResult
+
 import optuna
 from optuna import Trial
 from optuna.samplers import BaseSampler
@@ -32,12 +34,57 @@ class AbstractOptimizer:
     def finalize(self):
         pass
 
-    def optimize(self, n_trials):
+    def optimize(self, n_trials: Optional[int] = None):
         self.n_trials = n_trials
         self.history = History(self.parameters, self.objectives)
         self.setup()
         self.main()
         self.finalize()
+
+
+class ScipyOptimizer(AbstractOptimizer):
+
+    def __init__(
+            self,
+            method: Optional[str] = None,
+            calculator: Optional[AbstractCalculator] = None
+    ):
+        self.method = method
+        self._current_trial = 0
+        super().__init__(calculator)
+
+    def _objective(self, x: np.ndarray) -> float:
+
+        # check
+        self._current_trial += 1
+        if self._current_trial > (self.n_trials or np.inf):
+            raise StopIteration()
+
+        # update calculator
+        self.calculator.calculate(x)
+
+        # calc y
+        obj_fun = list(self.objectives.values())[0]
+        y: float = obj_fun(self.calculator)
+
+        # rec
+        self.history.record(x, np.array((y,)))
+
+        return y
+
+    def main(self):
+        assert len(self.objectives) == 1
+        try:
+            minimize(
+                fun=self._objective,
+                x0=self.parameters.init.values,
+                options=None,
+                bounds=self.parameters[['lb', 'ub']].values,
+                method=self.method,
+                tol=0.01,
+            )
+        except StopIteration:
+            pass
 
 
 class OptunaOptimizer(AbstractOptimizer):
