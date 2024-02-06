@@ -1,0 +1,112 @@
+from typing import Optional
+import datetime
+
+import numpy as np
+import pandas as pd
+from dask.distributed import Client
+
+import optuna
+from optuna import Trial
+from optuna.samplers import BaseSampler
+
+from .calculator import AbstractCalculator, HyperSphere
+from .core import History
+
+
+class AbstractOptimizer:
+
+    def __init__(self, calculator: Optional[AbstractCalculator] = None):
+        self.parameters: pd.DataFrame = pd.DataFrame()
+        self.objectives: dict = dict()
+        self.client: Optional[Client] = None
+        self.calculator: Optional[AbstractCalculator] = calculator or HyperSphere()
+        self.history: Optional[History] = None
+        self.n_trials: Optional[int] = None
+
+    def setup(self):
+        pass
+
+    def main(self):
+        raise NotImplementedError()
+
+    def finalize(self):
+        pass
+
+    def optimize(self, n_trials):
+        self.n_trials = n_trials
+        self.history = History(self.parameters, self.objectives)
+        self.setup()
+        self.main()
+        self.finalize()
+
+
+class OptunaOptimizer(AbstractOptimizer):
+
+    sampler = None
+    storage = None
+    study_name = 'my-study'
+    study = None
+
+    def __init__(
+            self,
+            sampler: Optional[BaseSampler] = None,
+            calculator: Optional[AbstractCalculator] = None
+    ):
+        self.sampler = sampler
+        super().__init__(calculator)
+
+    def setup(self):
+        # self.storage = optuna.integration.DaskStorage(
+        #     storage=None,
+        #     name=None,
+        #     client=self.client,
+        # )
+        self.storage = f'sqlite:///{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+
+        self.study = optuna.create_study(
+            storage=self.storage,
+            sampler=self.sampler,
+            study_name=self.study_name,
+            directions=['minimize']*len(self.objectives),
+            load_if_exists=True,
+        )
+
+    def main(self):
+        study = optuna.load_study(
+            study_name=self.study_name,
+            storage=self.storage,
+            sampler=None,
+        )
+
+        study.optimize(
+            func=self._objective,
+            n_trials=self.n_trials,
+            timeout=None,
+            callbacks=None,
+            gc_after_trial=True,
+            show_progress_bar=True,
+        )
+
+    def _objective(self, trial: Trial):
+        # create x
+        x = []
+        for i, row in self.parameters.iterrows():
+            name = row['name']
+            lb = row['lb']
+            ub = row['ub']
+            x.append(trial.suggest_float(name, low=lb, high=ub, step=None))
+        x = np.array(x)
+
+        # update calculator
+        self.calculator.calculate(x)
+
+        # calc y
+        y = []
+        for obj_name, obj_fun in self.objectives.items():
+            y.append(obj_fun(self.calculator))
+        y = np.array(y)
+
+        # rec
+        self.history.record(x, y)
+
+        return tuple(y)
